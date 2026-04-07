@@ -1,21 +1,11 @@
+import 'dart:typed_data';
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
-import 'package:permission_handler/permission_handler.dart';
 
 import 'vision_controller.dart';
-import 'damage_painter.dart';
 
-/// VisionPage implements the layered stack architecture
-/// for Smart Patrol System.
-///
-/// Architecture:
-/// - Layer 1 (Bottom): CameraPreview - Live video feed from hardware
-/// - Layer 2 (Top): CustomPaint - Digital overlay for detection boxes
-///
-/// This follows Separation of Concerns principle:
-/// - VisionController: Manages camera lifecycle and detection logic
-/// - VisionPage: Manages UI layout and user interactions
-/// - DamagePainter: Manages drawing logic (Phase 4)
+/// VisionView menampilkan aliran video mentah dari hardware
+/// dan memberikan UI overlay untuk memicu operasi PCD (OpenCV)
 class VisionView extends StatefulWidget {
   const VisionView({super.key});
 
@@ -24,33 +14,51 @@ class VisionView extends StatefulWidget {
 }
 
 class _VisionViewState extends State<VisionView> {
-  // Initialize controller locally for this page
   late VisionController _visionController;
 
   @override
   void initState() {
     super.initState();
     _visionController = VisionController();
-
-    // Start mock detection (Phase 5)
-    _visionController.startMockDetection();
   }
 
   @override
   void dispose() {
-    // MANDATORY: Disconnect camera when navigating away
-    // This prevents memory leaks and battery drain
+    // WAJIB: Putus koneksi hardware saat keluar halaman
     _visionController.dispose();
     super.dispose();
+  }
+
+  /// Fungsi untuk memunculkan pop-up hasil gambar dari OpenCV
+  void _showProcessedImage(Uint8List imageBytes) {
+    showDialog(
+      context: context,
+      barrierDismissible: false, // Wajib tap tombol tutup
+      builder: (context) => AlertDialog(
+        title: Text('Hasil PCD: ${_visionController.currentPcdMode}'),
+        content: ClipRRect(
+          borderRadius: BorderRadius.circular(8),
+          child: Image.memory(
+            imageBytes,
+            fit: BoxFit.contain,
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Tutup', style: TextStyle(fontWeight: FontWeight.bold)),
+          ),
+        ],
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text("Smart-Patrol Vision"),
+        title: const Text("Smart-Patrol PCD"),
         actions: [
-          // Flashlight toggle (Phase 6 UX Enhancement)
           IconButton(
             icon: Icon(
               _visionController.isFlashlightOn
@@ -60,123 +68,118 @@ class _VisionViewState extends State<VisionView> {
             onPressed: _visionController.toggleFlashlight,
             tooltip: 'Toggle Flashlight',
           ),
-          // Overlay visibility toggle (Phase 6 UX Enhancement)
-          IconButton(
-            icon: Icon(
-              _visionController.isOverlayVisible
-                  ? Icons.visibility
-                  : Icons.visibility_off,
-            ),
-            onPressed: _visionController.toggleOverlay,
-            tooltip: 'Toggle Overlay',
-          ),
         ],
       ),
       body: ListenableBuilder(
         listenable: _visionController,
         builder: (context, child) {
-          // Show loading if camera is initializing
+          // Tampilkan loading saat kamera inisialisasi
           if (!_visionController.isInitialized) {
-            return _buildLoadingState();
+            return const Center(child: CircularProgressIndicator());
           }
 
-          // Continue to Stack structure
-          return _buildVisionStack();
+          return Stack(
+            fit: StackFit.expand,
+            children: [
+              // LAYER 1: Hardware Preview (Kamera Asli)
+              Center(
+                child: AspectRatio(
+                  aspectRatio: _visionController.controller!.value.aspectRatio,
+                  child: CameraPreview(_visionController.controller!),
+                ),
+              ),
+
+              // LAYER 2: Indikator Loading OpenCV (Transparan)
+              if (_visionController.isProcessing)
+                Container(
+                  color: Colors.black54,
+                  child: const Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        CircularProgressIndicator(color: Colors.white),
+                        SizedBox(height: 16),
+                        Text(
+                          "Memproses Matriks OpenCV...",
+                          style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+
+              // LAYER 3: Opsi Pilihan Mode PCD (Dropdown)
+              Positioned(
+                bottom: 30,
+                left: 20,
+                right: 90, // Ruang untuk tombol jepret
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withOpacity(0.9),
+                    borderRadius: BorderRadius.circular(12),
+                    boxShadow: const [
+                      BoxShadow(
+                        color: Colors.black26,
+                        blurRadius: 4,
+                        offset: Offset(0, 2),
+                      )
+                    ],
+                  ),
+                  child: DropdownButtonHideUnderline(
+                    child: DropdownButton<String>(
+                      value: _visionController.currentPcdMode,
+                      isExpanded: true,
+                      icon: const Icon(Icons.tune, color: Colors.indigo),
+                      items: _visionController.pcdModes.map((String mode) {
+                        return DropdownMenuItem<String>(
+                          value: mode,
+                          child: Text(
+                            mode,
+                            style: const TextStyle(
+                              fontWeight: FontWeight.bold,
+                              color: Colors.black87,
+                            ),
+                          ),
+                        );
+                      }).toList(),
+                      onChanged: (String? newValue) {
+                        if (newValue != null) {
+                          _visionController.changePcdMode(newValue);
+                        }
+                      },
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          );
         },
       ),
+      
+      // TOMBOL JEPRET (Capture)
       floatingActionButton: FloatingActionButton(
         onPressed: () async {
-          final image = await _visionController.takePhoto();
-          if (image != null && context.mounted) {
+          // Cegah spam tap saat sedang loading
+          if (_visionController.isProcessing) return;
+
+          final processedBytes = await _visionController.captureAndProcessImage();
+          
+          if (processedBytes != null && context.mounted) {
+            _showProcessedImage(processedBytes);
+          } else if (context.mounted && _visionController.errorMessage != null) {
             ScaffoldMessenger.of(context).showSnackBar(
               SnackBar(
-                content: Text('Photo saved: ${image.path}'),
-                duration: const Duration(seconds: 3),
-                action: SnackBarAction(
-                  label: 'View',
-                  onPressed: () {
-                    ScaffoldMessenger.of(context).hideCurrentSnackBar();
-                    // You can add code here to open the image
-                    // For now, just showing the path
-                  },
-                ),
+                content: Text(_visionController.errorMessage!),
+                backgroundColor: Colors.red,
               ),
             );
           }
         },
-        tooltip: 'Capture Photo',
-        child: const Icon(Icons.camera),
+        backgroundColor: Colors.indigo,
+        tooltip: 'Proses Citra',
+        child: const Icon(Icons.camera, color: Colors.white, size: 28),
       ),
-    );
-  }
-
-  /// Build loading state with informative message
-  /// Phase 6 UX Enhancement
-  Widget _buildLoadingState() {
-    return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          const CircularProgressIndicator(),
-          const SizedBox(height: 16),
-          const Text(
-            "Menghubungkan ke Sensor Visual...",
-            style: TextStyle(fontSize: 16),
-          ),
-          if (_visionController.errorMessage != null) ...[
-            const SizedBox(height: 16),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 32),
-              child: Text(
-                _visionController.errorMessage!,
-                style: const TextStyle(color: Colors.red),
-                textAlign: TextAlign.center,
-              ),
-            ),
-            const SizedBox(height: 16),
-            ElevatedButton(
-              onPressed: () => openAppSettings(),
-              child: const Text("Open Settings"),
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-
-  /// Build the layered stack architecture
-  ///
-  /// This is the core of Vision architecture:
-  /// - Stack with fit: StackFit.expand fills entire screen
-  /// - Layer 1: CameraPreview with AspectRatio to prevent distortion
-  /// - Layer 2: CustomPaint for digital overlay
-  Widget _buildVisionStack() {
-    return Stack(
-      fit: StackFit.expand,
-      children: [
-        // LAYER 1: Hardware Preview
-        // Use AspectRatio to prevent image distortion (PCD Connection)
-        // Camera images often have different aspect ratios than screen
-        // This ensures the image maintains correct proportions
-        Center(
-          child: AspectRatio(
-            aspectRatio: _visionController.controller!.value.aspectRatio,
-            child: CameraPreview(_visionController.controller!),
-          ),
-        ),
-
-        // LAYER 2: Digital Overlay (Canvas)
-        // This layer is transparent and sits exactly above camera
-        // DamagePainter will draw detection boxes here (Phase 4)
-        if (_visionController.isOverlayVisible)
-          Positioned.fill(
-            child: CustomPaint(
-              painter: DamagePainter(
-                _visionController.currentDetections,
-              ), // Phase 4: Will be updated with detections
-            ),
-          ),
-      ],
     );
   }
 }
